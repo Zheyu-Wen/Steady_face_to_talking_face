@@ -4,16 +4,16 @@ import glob
 import os
 from PIL import Image
 
-def f2v(frames):
+def f2v(frames, save_dir):
     # create output video
     height = 224
     width = 224
     fourcc = cv2.VideoWriter_fourcc('M', 'J', 'P', 'G')
-    out = cv2.VideoWriter('test.avi', fourcc, 7, (height, width))
+    out = cv2.VideoWriter(save_dir, fourcc, 5, (height, width))
 
     for i in range(frames.shape[0]):
         # scale the frame back to 0-255
-        frame = (frames[i] * 255).astype(np.uint8)
+        frame = (frames[i]).astype(np.uint8)
         # write frame to output video
         out.write(frame)
     out.release()
@@ -41,5 +41,5 @@ if __name__=='__main__':
     png_file = sorted(glob.glob(f'{path}/_4YV5Z6jNWY*{tail}'))
     frames = np.zeros([len(test_file), 224, 224, 3])
     for i in range(len(test_file)):
-        frames[i, :, :, :] = cv2.imread(png_file[i])
-    f2v(frames)
+        frames[i, :, :, :] = cv2.cvtColor(cv2.imread(png_file[i]), cv2.COLOR_BGR2RGB)
+    f2v(frames, 'test.avi')
