@@ -1,0 +1,202 @@
+!pip install face_recognition
+
+!pip install ffmpeg
+!pip install youtube-dl
+
+!pip install keras_vggface
+!pip install --ignore-installed --upgrade keras
+
+!echo "Done setting up directories and environment, now proceed to download dataset...."
+!rm -r -f data
+import pandas as pd
+import os
+import shutil
+import subprocess
+import argparse
+import librosa
+from PIL import Image
+import face_recognition
+import torch
+from torch import nn
+import torchvision
+import torchvision.models as models
+import glob
+from torchvision.transforms import transforms
+from torch.utils.data import Dataset
+import ffmpeg
+import pickle
+import numpy as np
+import skimage
+import scipy
+import imageio
+from keras.engine import  Model
+from keras.layers import Input
+from keras_vggface.vggface import VGGFace
+from keras_vggface import utils
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+FNULL = open(os.devnull, 'w')
+
+
+vgg16 = models.vgg16(pretrained=True)
+for param in vgg16.parameters():
+    param.requires_grad = False
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+class Image_transfer:
+    def __init__(self, data_dir, size=224):
+        super().__init__()
+        self.jpg = sorted(glob.glob(f'{data_dir}/*.jpg', recursive=True))
+        self.npy = [direc.replace(".jpg", ".npy") for direc in self.jpg]
+        self.Dictionaries = {}
+        self.transform = transforms.Compose([
+            transforms.Resize(size),
+            transforms.ToTensor()
+        ])
+
+    def __len__(self):
+        return len(self.jpg)
+
+    def __getitem__(self, idx):
+        image = Image.open(self.jpg[idx])
+        image = self.transform(image)
+        return image
+
+def FeatureExtract(data_dir, batch_size):
+    Imagedata = Image_transfer(data_dir)
+    catagory = Imagedata.npy
+    all_feature = np.zeros([len(catagory), 4096])
+    Image_dataloader = torch.utils.data.DataLoader(Imagedata, batch_size=batch_size)
+    vgg16.classifier = vgg16.classifier[:4]
+    vgg16_ = vgg16.to(device)
+    i = 0
+    for image in Image_dataloader:
+        image = image.to(device)
+        pred = vgg16_(image)
+        feature = np.array(pred.cpu())
+        all_feature[i*batch_size:(i+1)*batch_size, :] = feature
+        i += 1
+        print("number of picture {}".format(i*batch_size))
+
+    for j in range(len(catagory)):
+        np.save(catagory[j], all_feature[j, :])
+
+    return 0
+
+
+def main():
+
+    embeddingvideos_path = "data/speaker_video_embeddings/"
+    audios_path = "data/audios/"
+    frames_path = "data/frames/"
+    videos_path = "data/videos/"
+    spect_path = "data/audio_spectrograms/"
+    fcropped_path = "data/cropped_frames/"
+    speakers_path = "data/speaker_video_embeddings/"
+
+    data = pd.read_csv("/content/drive/My Drive/avspeech_train.csv", header = None, names = ["id", "start", "end", "x", "y"])
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--from_id", type = int, default = 1006)
+    parser.add_argument("--to_id", type = int, default = 1007)
+    parser.add_argument("--low_memory", type = str, default = "no")
+    parser.add_argument("--sample_rate", type = int, default = 16000)
+    parser.add_argument("--duration", type = float, default = 0.35)
+    parser.add_argument("--fps", type = int, default = 1)
+    parser.add_argument("--mono", type = str, default = True)
+    parser.add_argument("--window", type = int, default = 400)
+    parser.add_argument("--stride", type = int, default = 160)
+    parser.add_argument("--fft_length", type = int, default = 512)
+    parser.add_argument("--amp_norm", type = int, default = 0.3)
+    parser.add_argument("--face_extraction_model", type = str, default = "cnn")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_known_args()[0]
+
+    face_extraction_model = args.face_extraction_model
+    vgg = VGGFace(model='vgg16')
+    out = vgg.get_layer('fc7').output
+    vgg_model = Model(vgg.input, out)
+
+    for i in range(args.from_id, args.to_id):
+        if (not os.path.isfile(videos_path + data.loc[i, "id"] + ".mp4")):       ###frames sampled
+            url = "youtube-dl -f best --limit-rate 8191 --get-url https://www.youtube.com/watch?v=" + str(data.loc[i, "id"])
+            res1 = subprocess.run(url, stdout=subprocess.PIPE, shell=True).stdout.decode("utf-8").rstrip()
+            if (res1 == ""):
+                if args.verbose:
+                    print("----------------------Video not available---------------------")
+                print("download failed")
+                continue
+
+            download = "ffmpeg" + " -nostats -loglevel 0 -ss " + str(data.loc[i, "start"]) + " -i \"" + res1 + "\"" + " -to " \
+                       + str(min(1000, float(data.loc[i, "end"]) - float(data.loc[i, "start"]))) + " -c:v copy -c:a copy " \
+                       + videos_path + str(data.loc[i, "id"]) + ".mp4"
+            res2 = subprocess.Popen(download, stdout=FNULL, shell=True).communicate()
+            extract_frames = "ffmpeg" + " -nostats -loglevel 0" + " -i %s.mp4" % (videos_path+data.loc[i, "id"]) + " -vf fps=3 %s%%02d.jpg" % (frames_path)
+            rs = subprocess.Popen(extract_frames, stdout=FNULL, shell=True).communicate()
+
+        count = int(np.floor((float(data.loc[i, "end"]) - float(data.loc[i, "start"]))/0.35)-1)
+        # count = min(count,18)
+        # print(count)
+        duration = str(0.35)
+        for n in range(count):
+            starttime = str(round(0.35*n,2))
+            extract_videos = "ffmpeg -i %s.mp4 -ss %s -t %s -c:v copy -c:a copy %s.mp4" % (videos_path+data.loc[i, "id"],starttime,duration,videos_path+data.loc[i, "id"]+"NO" + "%02d" %(n))
+            subprocess.Popen(extract_videos, stdout=FNULL, shell=True).communicate()
+
+            filename = str(data.loc[i, "id"]) +"NO%02d" % (n)
+            wavfile = filename + ".wav"
+            os.popen("ffmpeg -nostats -loglevel 0 -t " + str(0.35) + " -stream_loop -1  -i " + videos_path + filename + ".mp4" + " -vn " + spect_path + wavfile).read()
+
+            ### face detect
+            frame = Image.open(frames_path + "%02d" % (n+1) + ".jpg")
+            face_boxes = face_recognition.face_locations(np.array(frame), model=face_extraction_model)
+
+            print("face detect index is  %s NO %s" % (i, n))
+            top, right, bottom, left = np.squeeze(face_boxes)
+            frame_cropped = frame.crop(box=(left, top, right, bottom))
+
+            frame_resized = np.array(Image.fromarray(np.array(frame_cropped)).resize((224, 224)))
+            Image.fromarray(frame_resized).save(fcropped_path + filename + '.jpg')
+# if __name__ == "__main__":
+if not os.path.isdir('data'):
+    !mkdir data/
+    !mkdir data/speaker_video_embeddings
+    !mkdir data/audios
+    !mkdir data/videos
+    !mkdir data/audio_spectrograms
+    !mkdir data/frames
+    !mkdir data/cropped_frames
+    !mkdir data/pretrained_model
+    !mkdir data/cropped_models
+    !mkdir data/wavnpy
+    !mkdir data/facenpy
+    !mkdir data/jpgnpy
+main()
+# save face feature npy
+# datadir = "data/cropped_frames"
+# FeatureExtract(datadir, batch_size=10)
+# all_file = os.listdir("data/cropped_frames")
+# for f in all_file:
+#     filename = os.path.splitext(f)[0] + "face"
+#     if (os.path.splitext(f)[1] == '.npy'):
+#         shutil.copy('data/cropped_frames/' + f, 'data/facenpy/' + filename + '.npy')
+# # save face npy
+# all_file = os.listdir("data/cropped_frames")
+# for f in all_file:
+#     filename = os.path.splitext(f)[0] + "jpg"
+#     if (os.path.splitext(f)[1] == '.jpg'):
+#         im = Image.open("data/cropped_frames/" + f)
+#         np.save("data/jpgnpy/" + filename + '.npy', np.array(im))
+# # save wav npy
+# from scipy.io.wavfile import read
+# import numpy as np
+
+# os.getcwd()
+# all_file = os.listdir("data/audios")
+# for f in all_file:
+#     filename = os.path.splitext(f)[0] + "wav"
+#     np.save("data/wavnpy/" + filename + '.npy', np.array(read("data/audios/" + f)[1], dtype=float))
+# !zip -r jpgnpy.zip data/jpgnpy  
+# !zip -r wavnpy.zip data/wavnpy
+# !zip -r facenpy.zip data/facenpy
+# print("saved ok")
+# shutil.rmtree('data')  # delete the folder
